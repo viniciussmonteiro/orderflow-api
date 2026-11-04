@@ -7,7 +7,15 @@ import dev.vinicius.orderflow.product.ProductRepository;
 
 import java.math.BigDecimal;
 
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
 import org.junit.jupiter.api.Test;
+
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
@@ -19,6 +27,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -177,4 +186,94 @@ class OrderIntegrationTest {
                         .content(request))
                 .andExpect(status().isConflict());
     }
+
+
+    @Test
+    void shouldPreventOversellingWithConcurrentOrders() throws Exception {
+
+        // Produto com apenas uma unidade disponível
+        Product product = products.saveAndFlush(
+                new Product(
+                        "TEST-CONCURRENT",
+                        "Produto Concorrente",
+                        new BigDecimal("10.00"),
+                        1
+                )
+        );
+
+        long ordersBefore = orders.count();
+
+        // Ambas as compras solicitam a mesma unidade
+        String request = """
+            {
+              "customerName": "Cliente Concorrente",
+              "items": [
+                {"productId": %d, "quantity": 1}
+              ]
+            }
+            """.formatted(product.getId());
+
+        // Duas threads simulam dois clientes
+        var executor = Executors.newFixedThreadPool(2);
+
+        // Sincronização do início das requisições
+        var ready = new CountDownLatch(2);
+        var start = new CountDownLatch(1);
+
+        Callable<Integer> purchase = () -> {
+            ready.countDown();
+
+            if (!start.await(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException(
+                        "Tempo de espera excedido"
+                );
+            }
+
+            return mockMvc.perform(
+                    post("/api/v1/orders")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(request)
+            ).andReturn().getResponse().getStatus();
+        };
+
+        var first = executor.submit(purchase);
+        var second = executor.submit(purchase);
+
+        try {
+            // Aguarda as duas threads ficarem prontas
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+
+            // Libera as duas requisições
+            start.countDown();
+
+            List<Integer> statuses = List.of(
+                    first.get(20, TimeUnit.SECONDS),
+                    second.get(20, TimeUnit.SECONDS)
+            );
+
+            // Exatamente uma compra deve ser aprovada
+            assertEquals(1L, statuses.stream()
+                    .filter(status -> status == 201)
+                    .count());
+
+            // A outra deve ser rejeitada
+            assertEquals(1L, statuses.stream()
+                    .filter(status -> status == 409)
+                    .count());
+
+            // Estoque final deve ser zero
+            assertEquals(0, products.findById(product.getId())
+                    .orElseThrow().getStock());
+
+            // Apenas um novo pedido deve existir
+            assertEquals(ordersBefore + 1, orders.count());
+
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+
+
 }
