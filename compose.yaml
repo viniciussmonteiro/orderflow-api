@@ -1,0 +1,29 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: orderflow
+      POSTGRES_USER: orderflow
+      POSTGRES_PASSWORD: orderflow_dev_only
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - orderflow_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orderflow -d orderflow"]
+      interval: 5s
+      retries: 10
+  api:
+    build: .
+    profiles: ["api"]
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/orderflow
+      DB_USER: orderflow
+      DB_PASSWORD: orderflow_dev_only
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+volumes:
+  orderflow_postgres:
