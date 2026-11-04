@@ -1,133 +1,190 @@
 # OrderFlow API
 
-API REST para gerenciamento de **produtos, pedidos e estoque**, desenvolvida em Java e Spring Boot para explorar regras de negócio comuns em sistemas comerciais.
+[![Java CI](https://github.com/viniciussmonteiro/orderflow-api/actions/workflows/ci.yml/badge.svg)](https://github.com/viniciussmonteiro/orderflow-api/actions/workflows/ci.yml)
 
-O projeto concentra-se na consistência dos dados: ao confirmar um pedido, a aplicação valida a disponibilidade dos produtos, calcula os valores e atualiza o estoque dentro de uma transação.
+API REST para **gerenciamento de produtos, criação de pedidos e controle de estoque**, desenvolvida com **Java 21, Spring Boot 4 e PostgreSQL 17**.
 
-**Status:** MVP inicial (`0.1.0-SNAPSHOT`) — em desenvolvimento.
+O principal desafio abordado pelo projeto é a **consistência de operações transacionais**: uma compra deve validar os itens, calcular os valores e reservar o estoque de forma atômica, inclusive quando diferentes requisições tentam adquirir o mesmo produto simultaneamente.
+
+**Estado atual:** MVP funcional, versão de desenvolvimento `0.1.0-SNAPSHOT`. A API foi validada localmente e por uma pipeline de integração contínua no GitHub Actions.
+
+## Destaques técnicos
+
+- **Consistência transacional:** criação de pedidos com `@Transactional`, garantindo rollback quando uma operação não pode ser concluída.
+- **Proteção contra venda acima do estoque:** bloqueio pessimista (`PESSIMISTIC_WRITE`) durante a reserva de produtos, com aquisição de bloqueios em ordem crescente de ID.
+- **Cálculos monetários precisos:** uso de `BigDecimal` para preços, subtotais e total dos pedidos.
+- **Histórico preservado:** os itens do pedido armazenam um registro dos dados do produto e do preço no momento da compra.
+- **Validação e tratamento de erros:** Bean Validation e respostas HTTP padronizadas com `ProblemDetail` para erros `400`, `404` e `409`.
+- **Qualidade automatizada:** 11 testes unitários e de integração, incluindo concorrência real sobre PostgreSQL com Testcontainers.
 
 ## Tecnologias
 
-- **Java 21** e **Spring Boot 4.1.2** (Spring Web MVC, Spring Data JPA e Bean Validation)
-- **PostgreSQL 17**, **Hibernate** e **Flyway**
-- **JUnit 5** e **Mockito**
-- **Maven**, **Docker Compose** e **GitHub Actions** (workflow configurado; validação da execução pendente)
+| Área | Tecnologias |
+| --- | --- |
+| Linguagem e framework | Java 21, Spring Boot 4.1.2, Spring Web MVC |
+| Persistência | Spring Data JPA, Hibernate, PostgreSQL 17 |
+| Migrações e validação | Flyway, Jakarta Bean Validation |
+| Testes | JUnit, Mockito, Spring MockMvc, Testcontainers |
+| Documentação | OpenAPI 3.1, springdoc-openapi, Swagger UI |
+| Ferramentas e automação | Maven, Docker, Docker Compose, Git, GitHub Actions |
 
 ## Funcionalidades implementadas
 
-- Cadastro, listagem e consulta de produtos por ID.
-- Criação e consulta de pedidos com múltiplos itens.
-- Cálculo de subtotais e total com `BigDecimal`.
-- Verificação de estoque e redução da quantidade disponível após a confirmação do pedido.
-- Tratamento de erros HTTP para dados inválidos, recursos inexistentes e conflitos de negócio.
-- Persistência com JPA e controle de esquema do banco com migrações Flyway.
-- Uso de transação e bloqueio pessimista na criação de pedidos; testes de concorrência ainda estão planejados.
+- Cadastrar produtos com SKU, nome, preço e quantidade em estoque.
+- Listar produtos cadastrados e consultar um produto por ID.
+- Criar pedidos com um ou mais itens e consultar pedidos por ID.
+- Calcular subtotais e total, preservando os valores registrados nos itens dos pedidos.
+- Validar disponibilidade de estoque antes de confirmar uma compra.
+- Rejeitar pedidos inválidos, produtos inexistentes, SKUs duplicados e tentativas de compra sem estoque suficiente.
+- Atualizar o estoque dentro da mesma transação que registra o pedido.
 
-## Endpoints
+## Arquitetura e decisões de projeto
 
-| Método | Endpoint | Descrição |
-| --- | --- | --- |
-| `POST` | `/api/v1/products` | Cadastrar produto |
-| `GET` | `/api/v1/products` | Listar produtos |
-| `GET` | `/api/v1/products/{id}` | Consultar produto |
-| `POST` | `/api/v1/orders` | Criar pedido |
-| `GET` | `/api/v1/orders/{id}` | Consultar pedido |
+A aplicação utiliza uma arquitetura em camadas, organizada por domínio (`product`, `order` e `shared`):
 
-## Executando localmente
+```text
+Requisição HTTP
+    ↓
+Controller → validação de entrada
+    ↓
+Service → regras de negócio e transações
+    ↓
+Repository → Spring Data JPA / Hibernate
+    ↓
+PostgreSQL
+```
+
+Na criação de pedidos, os produtos são consultados com bloqueio pessimista e processados em ordem crescente de ID. Essa abordagem reduz disputas de concorrência e evita que duas compras confirmem a mesma unidade disponível. Se algum item não puder ser processado, a transação é revertida, preservando a consistência do estoque e dos pedidos.
+
+O esquema do banco é versionado com **Flyway**, enquanto as falhas de negócio e validação são traduzidas para respostas HTTP por um tratamento centralizado de exceções.
+
+Detalhes adicionais estão disponíveis em [docs/architecture.md](docs/architecture.md).
+
+## Endpoints REST
+
+| Método | Endpoint | Descrição | Respostas principais |
+| --- | --- | --- | --- |
+| `POST` | `/api/v1/products` | Cadastrar produto | `201`, `400`, `409` |
+| `GET` | `/api/v1/products` | Listar produtos | `200` |
+| `GET` | `/api/v1/products/{id}` | Consultar produto | `200`, `404` |
+| `POST` | `/api/v1/orders` | Criar pedido | `201`, `400`, `404`, `409` |
+| `GET` | `/api/v1/orders/{id}` | Consultar pedido | `200`, `404` |
+
+### Documentação interativa
+
+Com a aplicação em execução, a especificação OpenAPI e os endpoints podem ser explorados diretamente pelo navegador:
+
+- **Swagger UI:** http://localhost:8080/swagger-ui/index.html
+- **OpenAPI JSON:** http://localhost:8080/v3/api-docs
+
+A documentação apresenta os contratos de entrada e saída, as operações disponíveis e os formatos das respostas de erro.
+
+## Execução local
 
 **Pré-requisitos:** JDK 21, Maven 3.9+ e Docker com Docker Compose.
 
-1. Inicie o PostgreSQL:
+1. Iniciar o banco PostgreSQL:
 
    ```bash
    docker compose up -d db
    ```
 
-2. Inicie a aplicação:
+2. Iniciar a API:
 
    ```bash
    mvn spring-boot:run
    ```
 
-3. Consulte os produtos em `http://localhost:8080/api/v1/products`.
+3. Acessar a [documentação Swagger](http://localhost:8080/swagger-ui/index.html) ou consultar `http://localhost:8080/api/v1/products`.
 
-A configuração local usa **porta 8080** para a API e **porta 5433** no host para o PostgreSQL (que continua utilizando a porta 5432 dentro do contêiner). As credenciais do Compose são exclusivas do ambiente de desenvolvimento.
+A API utiliza a porta **8080**. O PostgreSQL é publicado apenas no endereço local `127.0.0.1:5433`, encaminhado para a porta `5432` do contêiner. As credenciais configuradas no Compose destinam-se exclusivamente ao desenvolvimento local.
 
-### Exemplo de uso no Windows PowerShell
+### Exemplo de utilização (PowerShell)
 
 Cadastrar um produto:
 
 ```powershell
 $produto = @{
-    sku = 'BOOK-001'
-    name = 'Livro Java'
+    sku   = 'DEMO-BOOK-001'
+    name  = 'Livro Java'
     price = 59.90
     stock = 10
 } | ConvertTo-Json
 
 $novoProduto = Invoke-RestMethod -Method Post `
     -Uri 'http://localhost:8080/api/v1/products' `
-    -ContentType 'application/json' -Body $produto
+    -ContentType 'application/json' `
+    -Body $produto
 
 $novoProduto
 ```
 
-Criar um pedido usando o ID retornado no cadastro:
+Criar um pedido com duas unidades do produto cadastrado:
 
 ```powershell
 $pedido = @{
-    customerName = 'Cliente Teste'
-    items = @(@{ productId = $novoProduto.id; quantity = 2 })
+    customerName = 'Cliente Exemplo'
+    items = @(
+        @{ productId = $novoProduto.id; quantity = 2 }
+    )
 } | ConvertTo-Json -Depth 5
 
 Invoke-RestMethod -Method Post `
     -Uri 'http://localhost:8080/api/v1/orders' `
-    -ContentType 'application/json' -Body $pedido
+    -ContentType 'application/json' `
+    -Body $pedido
 ```
 
-Consulte `/api/v1/products` novamente para verificar a quantidade em estoque. Use outro SKU caso já tenha cadastrado `BOOK-001`.
+Nesse cenário, o pedido tem total de **R$ 119,80** e o estoque do produto passa de **10 para 8 unidades**. Para repetir o cadastro, utilize um SKU diferente, pois o campo é único.
 
-## Testes e validações
+## Testes e integração contínua
 
-Os **5 testes unitários existentes foram executados com sucesso** em ambiente local (`mvn test`), sem falhas. Eles cobrem comportamentos de produto e serviço de pedidos, mas não substituem testes de integração com PostgreSQL.
+A suíte atual contém **11 testes automatizados**:
 
-Também foram validados manualmente os seguintes fluxos com a API e o banco em execução:
+| Tipo | Quantidade | Cenários abordados |
+| --- | ---: | --- |
+| Unitários | 5 | Regras de produto e serviço de pedidos |
+| Integração | 6 | Criação de pedidos, atualização e insuficiência de estoque, rollback, validação, SKU duplicado e concorrência |
 
-- Cadastro de um produto com 10 unidades em estoque.
-- Criação de pedido com 2 unidades, totalizando R$ 119,80.
-- Redução de estoque de 10 para 8 unidades.
-- Rejeição de um pedido de 9 unidades quando havia apenas 8 em estoque: a API retornou `409 Conflict` e preservou as 8 unidades.
+O teste de concorrência dispara **duas requisições simultâneas** para um produto com apenas uma unidade disponível. O cenário verifica que somente uma compra retorna `201 Created`, a outra retorna `409 Conflict`, o estoque termina em zero e apenas um pedido é persistido.
 
-Para executar os testes:
+Os testes de integração utilizam **PostgreSQL real em contêiner temporário**, iniciado pelo Testcontainers. Por isso, o Docker precisa estar ativo durante sua execução:
 
 ```bash
-mvn test
+mvn clean test
 ```
 
-## Organização do projeto
+A pipeline [Java CI](https://github.com/viniciussmonteiro/orderflow-api/actions/workflows/ci.yml) executa `mvn test` automaticamente em pushes e pull requests. A execução que incorporou a documentação OpenAPI foi concluída com sucesso.
+
+## Estrutura do projeto
 
 ```text
 src/main/java/dev/vinicius/orderflow/
-├── product/    # Produtos e regras de estoque
-├── order/      # Pedidos e itens
-└── shared/     # Exceções e tratamento de erros
-src/main/resources/db/migration/  # Migrações Flyway
-src/test/                        # Testes automatizados
-docs/                            # Arquitetura e planejamento
-.github/workflows/               # Configuração de CI
+├── product/                 # Entidade, DTOs, endpoints e serviços de produtos
+├── order/                   # Pedidos, itens, DTOs e regras transacionais
+├── shared/                  # Exceções e respostas de erro
+└── OrderFlowApplication.java
+src/main/resources/
+├── db/migration/            # Migrações versionadas com Flyway
+└── application.yml          # Configurações da aplicação
+src/test/java/              # Testes unitários e de integração
+.github/workflows/ci.yml    # Pipeline de integração contínua
+compose.yaml                # PostgreSQL e perfil opcional da API
+Dockerfile                  # Build da aplicação em contêiner
+README.md                   # Apresentação e execução do projeto
+docs/                       # Arquitetura e planejamento
 ```
 
-## Próximos passos
+## Escopo e evolução
 
-- Testes de integração com Testcontainers e cenários de concorrência.
-- Revisão das dependências e alertas de segurança.
-- Documentação OpenAPI/Swagger UI.
-- Evolução do catálogo, cancelamento de pedidos e autenticação.
+O OrderFlow é um **projeto de portfólio backend**. A versão atual prioriza integridade de dados, testes automatizados e documentação de API, e não deve ser interpretada como um serviço pronto para produção.
 
-O planejamento está documentado em [`docs/roadmap.md`](docs/roadmap.md).
+A aplicação ainda **não possui autenticação ou autorização** e foi preparada para utilização local. Entre as evoluções planejadas estão paginação e filtros no catálogo, cancelamento com reposição de estoque, idempotência na criação de pedidos e mecanismos de segurança para uma eventual publicação.
 
-> **Limitação atual:** a API não possui autenticação. O projeto foi configurado para execução local e não deve ser exposto diretamente à internet como serviço de produção.
+A revisão de dependências incluiu atualizações de segurança para Jackson, Logback e ASM e a substituição da antiga biblioteca Android JSON. Permanece em avaliação um alerta associado ao `json-smart`, dependência transitiva utilizada **somente no escopo de testes**; isso não representa uma correção definitiva da vulnerabilidade.
+
+O planejamento incremental está disponível em [docs/roadmap.md](docs/roadmap.md).
 
 ## Autor
 
-**[Vinicius Monteiro](https://github.com/viniciussmonteiro)** — projeto de portfólio Java Backend.
+**[Vinicius Monteiro](https://github.com/viniciussmonteiro)** — desenvolvimento Java Backend.
