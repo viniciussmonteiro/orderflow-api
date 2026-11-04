@@ -10,7 +10,7 @@
   </parent>
   <groupId>dev.vinicius</groupId>
   <artifactId>orderflow-api</artifactId>
-  <version>0.1.0-SNAPSHOT</version>
+  <version>0.1.0</version>
   <name>OrderFlow API</name>
   <description>Order and inventory API built with Spring Boot</description>
 
@@ -24,6 +24,12 @@
 
   <dependencyManagement>
     <dependencies>
+      <!-- Correção do CVE-2026-113602 -->
+      <dependency>
+        <groupId>net.minidev</groupId>
+        <artifactId>json-smart</artifactId>
+        <version>2.6.1</version>
+      </dependency>
       <!-- Versão corrigida do ASM, usado nos testes -->
       <dependency>
         <groupId>org.ow2.asm</groupId>

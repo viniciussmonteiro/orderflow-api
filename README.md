@@ -6,7 +6,7 @@ API REST para **gerenciamento de produtos, criação de pedidos e controle de es
 
 O principal desafio abordado pelo projeto é a **consistência de operações transacionais**: uma compra deve validar os itens, calcular os valores e reservar o estoque de forma atômica, inclusive quando diferentes requisições tentam adquirir o mesmo produto simultaneamente.
 
-**Estado atual:** MVP funcional, versão de desenvolvimento `0.1.0-SNAPSHOT`. A API foi validada localmente e por uma pipeline de integração contínua no GitHub Actions.
+**Estado atual:** MVP funcional, versão de desenvolvimento `0.1.0`. A API foi validada localmente e por uma pipeline de integração contínua no GitHub Actions.
 
 ## Destaques técnicos
 

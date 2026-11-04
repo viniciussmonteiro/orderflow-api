@@ -4,145 +4,162 @@
 
 O **OrderFlow API** é um monólito modular de pequeno porte para gerenciamento de produtos, pedidos e estoque. Foi desenvolvido com **Java 21, Spring Boot 4.1.2, Spring Data JPA, PostgreSQL 17 e Flyway**, priorizando consistência transacional, regras de negócio explícitas e testes automatizados.
 
-O projeto encontra-se na versão de desenvolvimento `0.1.0-SNAPSHOT`. É um **MVP de portfólio para uso local**, não um serviço preparado para exposição pública.
+O código foi preparado e validado localmente para a versão **`0.1.0`**. A criação da tag `v0.1.0` e da GitHub Release ainda integra a etapa de publicação. O software destina-se à execução local: disponibilizar o repositório publicamente **não** significa disponibilizar a API como serviço público.
 
 ## 2. Organização e fluxo de requisições
 
 ```text
 Cliente HTTP / Swagger UI
-        |
-        v
+          |
+          v
 @RestController (product / order)
-        |  @Valid e DTOs de entrada
-        v
+          | @Valid e DTOs de entrada
+          v
 @Service (regras de negócio)
-        |  @Transactional na criação de pedidos
-        v
+          | @Transactional na criação de pedidos
+          v
 Spring Data JPA (repositories)
-        |  Hibernate + bloqueio pessimista quando necessário
-        v
+          | Hibernate + bloqueio pessimista na reserva de estoque
+          v
 PostgreSQL 17
-        ^
-        |  Migrações SQL versionadas pelo Flyway
+          ^
+          | Migrações SQL versionadas pelo Flyway
 ```
 
-| Módulo | Responsabilidade | Componentes principais |
+| Módulo | Responsabilidade | Principais componentes |
 | --- | --- | --- |
 | `product` | Cadastro, consulta, validação de SKU e reserva de estoque | `Product`, `ProductDto`, `ProductController`, `ProductService`, `ProductRepository` |
 | `order` | Criação e consulta de pedidos, itens, totalização e transações | `CustomerOrder`, `OrderItem`, `OrderDto`, `OrderController`, `OrderService`, `OrderRepository` |
-| `shared` | Exceções de domínio e mapeamento de falhas para respostas HTTP | `BusinessConflictException`, `ResourceNotFoundException`, `ApiExceptionHandler` |
+| `shared` | Exceções de domínio e mapeamento para respostas HTTP | `BusinessConflictException`, `ResourceNotFoundException`, `ApiExceptionHandler` |
 
-O código de produção está em `src/main/java/dev/vinicius/orderflow/`. O esquema de banco é mantido em `src/main/resources/db/migration/`.
+O código de produção encontra-se em `src/main/java/dev/vinicius/orderflow/`. As migrações SQL estão em `src/main/resources/db/migration/`.
 
 ## 3. Modelo de dados
 
-A migração inicial `V1__create_orderflow_tables.sql` cria três tabelas:
+A migração `V1__create_orderflow_tables.sql` define três tabelas:
 
 | Tabela | Campos e restrições relevantes |
 | --- | --- |
 | `products` | `id` (PK), `sku` (único), `name`, `price` (positivo), `stock` (não negativo) |
 | `customer_orders` | `id` (PK), `customer_name`, `status`, `total` (não negativo), `created_at` |
-| `order_items` | `id` (PK), `order_id` (FK para `customer_orders`), `product_id`, `sku`, `product_name`, `unit_price`, `quantity`, `subtotal` |
+| `order_items` | `id` (PK), `order_id` (FK para `customer_orders`), `product_id`, `sku`, `product_name`, `unit_price`, `quantity` (positiva), `subtotal` |
 
-- Um pedido possui vários itens; o relacionamento é persistido por `order_items.order_id`.
-- Cada item guarda **um snapshot** do identificador, SKU, nome e preço do produto no momento da compra. Assim, a leitura do pedido não depende de consultar o preço atual do catálogo.
-- O campo `order_items.product_id` é armazenado como identificador do produto, **sem uma foreign key para `products` na migração atual**.
-- O banco aplica restrições de unicidade e de valores, além das validações feitas na camada HTTP.
-- O Flyway administra as migrações; o Hibernate está configurado com `ddl-auto: validate`, sem criar nem modificar o esquema automaticamente.
+- Um pedido possui vários itens, relacionados por `order_items.order_id`.
+- Cada item registra **um snapshot** do identificador, SKU, nome e preço do produto no momento da compra. A leitura posterior de um pedido não depende do preço atual do catálogo.
+- `order_items.product_id` armazena o identificador do produto, **sem uma foreign key para `products`** na migração atual.
+- O banco aplica restrições de unicidade e valores, complementando as validações feitas na API.
+- O **Flyway** controla as mudanças do esquema e o **Hibernate** usa `ddl-auto: validate`, sem criar nem modificar tabelas automaticamente.
 
-Na versão atual, o estado existente de um pedido é `CONFIRMED`; cancelamento e outros estados permanecem no roadmap.
+Na versão atual, os pedidos são criados com o estado `CONFIRMED`. Cancelamento e outros estados fazem parte de evoluções planejadas.
 
 ## 4. Criação de pedidos e consistência transacional
 
-A operação `POST /api/v1/orders` é executada por `OrderService.create()` dentro de uma transação Spring (`@Transactional`):
+O endpoint `POST /api/v1/orders` utiliza `OrderService.create()` com `@Transactional`:
 
-1. O DTO é validado na entrada (`customerName` obrigatório, itens não vazios e quantidades positivas).
-2. O serviço rejeita produtos duplicados no mesmo pedido.
-3. Os itens são ordenados por `productId`, estabelecendo uma ordem de aquisição de bloqueios mais previsível.
-4. Para cada item, `ProductRepository.findByIdForUpdate()` consulta o produto com `@Lock(PESSIMISTIC_WRITE)`.
-5. `Product.reserveStock(quantity)` verifica a disponibilidade e reduz o estoque; `OrderItem` registra o snapshot e calcula seu subtotal com `BigDecimal`.
-6. `CustomerOrder` acumula o total e é persistido com os itens.
-7. Em caso de sucesso, o endpoint retorna `201 Created`. Se houver erro de negócio ou produto inexistente, uma exceção faz a transação ser revertida.
+1. O DTO é validado na camada HTTP: nome do cliente obrigatório, lista não vazia e quantidades positivas.
+2. O serviço rejeita itens com `productId` repetido no mesmo pedido.
+3. Os itens são ordenados por `productId`, estabelecendo uma ordem consistente para aquisição dos bloqueios.
+4. `ProductRepository.findByIdForUpdate()` consulta cada produto com `@Lock(PESSIMISTIC_WRITE)`.
+5. `Product.reserveStock(quantity)` verifica o saldo e reduz a quantidade disponível. `OrderItem` registra os dados da compra e calcula o subtotal usando `BigDecimal`.
+6. `CustomerOrder` acumula o total e é persistido junto com os itens.
+7. A operação bem-sucedida retorna `201 Created`. Se ocorrer uma exceção de negócio ou recurso inexistente, a transação é revertida.
 
 ### Por que usar bloqueio pessimista?
 
-Um estoque de **uma unidade** não pode confirmar duas compras concorrentes de uma unidade cada. O bloqueio de linha no PostgreSQL faz com que uma transação obtenha o lock antes de modificar o estoque; uma operação concorrente observa a disponibilidade após a liberação do bloqueio. Ordenar os produtos por ID ajuda a **reduzir**, mas não elimina em todos os cenários, o risco de deadlocks.
+Duas compras não podem confirmar simultaneamente a única unidade disponível. O bloqueio de linha no PostgreSQL serializa a modificação daquele produto; a transação concorrente encontra o estoque atualizado ao adquirir o bloqueio. A ordem crescente de IDs ajuda a **reduzir**, mas não elimina universalmente, o risco de deadlocks.
 
-O teste de concorrência implementado inicia duas requisições com threads e `CountDownLatch`, verificando:
+O teste de concorrência executa duas requisições coordenadas com threads e `CountDownLatch` e verifica:
 
 - uma requisição com `201 Created` e outra com `409 Conflict`;
 - estoque final igual a zero;
-- apenas um novo pedido persistido.
+- somente um pedido novo persistido.
 
-Esse teste foi executado com PostgreSQL real via Testcontainers. Ele é uma evidência de consistência para o cenário definido, **não um teste de estresse nem uma prova universal de ausência de condições de corrida**.
+O teste usa PostgreSQL real via Testcontainers. Trata-se de uma evidência para o cenário definido, **não de um teste de estresse nem de uma garantia contra todas as condições de corrida**.
 
 ## 5. Contratos HTTP e tratamento de erros
 
-Os Controllers expõem cinco endpoints versionados em `/api/v1`:
+A API expõe cinco endpoints sob o prefixo `/api/v1`:
 
-| Método | Rota | Finalidade |
+| Método | Rota completa | Finalidade |
 | --- | --- | --- |
-| `POST` | `/products` | Cadastrar produto |
-| `GET` | `/products` | Listar produtos |
-| `GET` | `/products/{id}` | Consultar produto |
-| `POST` | `/orders` | Criar pedido |
-| `GET` | `/orders/{id}` | Consultar pedido |
+| `POST` | `/api/v1/products` | Cadastrar produto |
+| `GET` | `/api/v1/products` | Listar produtos |
+| `GET` | `/api/v1/products/{id}` | Consultar produto |
+| `POST` | `/api/v1/orders` | Criar pedido |
+| `GET` | `/api/v1/orders/{id}` | Consultar pedido |
 
-A validação da entrada combina Jakarta Bean Validation (`@Valid`, `@NotBlank`, `@Min`, `@Size` etc.) com regras de negócio do serviço. O `ApiExceptionHandler`, baseado em `@RestControllerAdvice`, retorna `ProblemDetail` para:
+A entrada usa Jakarta Bean Validation (`@Valid`, `@NotBlank`, `@Min`, `@Size` etc.) e regras de negócio nos serviços. O `ApiExceptionHandler`, baseado em `@RestControllerAdvice`, retorna `ProblemDetail` nos casos tratados:
 
-- **`400 Bad Request`** — violações de validação de parâmetros do corpo tratadas por `MethodArgumentNotValidException`;
+- **`400 Bad Request`** — falhas de validação do corpo da requisição (`MethodArgumentNotValidException`);
 - **`404 Not Found`** — produto ou pedido inexistente;
 - **`409 Conflict`** — estoque insuficiente, conflitos de negócio ou violações de integridade contempladas pelo handler.
 
-O tratamento explícito de outras entradas malformadas (como JSON inválido) ainda pode ser ampliado. Os nomes dos esquemas OpenAPI são diferenciados para evitar colisões entre DTOs internos `Create` e `View`.
+Casos adicionais, como respostas customizadas para JSON malformado, permanecem no roadmap. Os esquemas OpenAPI têm nomes específicos para evitar colisões entre os DTOs internos `Create` e `View`.
 
-A documentação interativa está disponível, **quando a aplicação está em execução local**, em:
+A documentação interativa está disponível **com a API rodando localmente**:
 
-- Swagger UI: `http://localhost:8080/swagger-ui/index.html`
-- Especificação OpenAPI: `http://localhost:8080/v3/api-docs`
+- [Swagger UI](http://localhost:8080/swagger-ui/index.html)
+- [Especificação OpenAPI JSON](http://localhost:8080/v3/api-docs)
 
 ## 6. Testes e integração contínua
 
-A suíte atual possui **11 testes automatizados**:
+A suíte contém **11 testes automatizados**:
 
-- **5 unitários:** comportamento da entidade `Product` e das regras de `OrderService`.
-- **6 de integração:** criação do pedido e redução de estoque; estoque insuficiente; rollback quando um produto não existe; quantidade zero; SKU duplicado; duas compras concorrentes.
+- **5 unitários:** regras da entidade `Product` e do serviço `OrderService`.
+- **6 de integração:** criação de pedido e redução de estoque; estoque insuficiente; rollback por produto inexistente; quantidade zero; SKU duplicado; compras concorrentes.
 
-Os testes de integração usam `@SpringBootTest`, Spring MockMvc, Testcontainers e uma instância temporária de `postgres:17-alpine`. Eles exercitam a aplicação com transações reais de banco. Para executá-los localmente, o Docker Desktop precisa estar acessível.
+Os testes de integração usam `@SpringBootTest`, Spring MockMvc, Testcontainers e PostgreSQL `17-alpine`, com banco temporário. Para executá-los localmente, o Docker precisa estar disponível.
 
 ```bash
-mvn clean test
+mvn clean verify
 ```
 
-O workflow `.github/workflows/ci.yml` utiliza **Java 21** e executa `mvn -B -ntp test` em pushes para `main` e em pull requests. A execução associada ao commit `08a9096` (OpenAPI) foi concluída com sucesso. As Actions utilizadas no workflow ainda precisam de revisão de versões antes da release.
+O workflow `.github/workflows/ci.yml` utiliza **Java 21**, `actions/checkout@v7` e `actions/setup-java@v6`, executando `mvn -B -ntp verify` em pushes para `main` e em pull requests. A execução referente ao commit **`50c28e5`** foi aprovada com 11 testes, 0 falhas e geração de JAR executável. As alterações locais preparatórias da versão `0.1.0` deverão ser validadas novamente pelo CI depois do respectivo commit.
 
 ## 7. Execução local e contêineres
 
-- `application.yml`: porta `8080`; conexão padrão com PostgreSQL em `localhost:5433`, configurável por `DB_URL`, `DB_USER` e `DB_PASSWORD`.
-- `compose.yaml`: serviço `db` com `postgres:17-alpine`, healthcheck e volume nomeado persistente; porta publicada apenas em `127.0.0.1:5433` no host.
-- `compose.yaml`: serviço opcional `api`, habilitado pelo perfil `api`, que usa o hostname `db` na conexão JDBC e depende do banco saudável.
-- `Dockerfile`: build em múltiplos estágios (Maven + Java 21; runtime Java 21 JRE) e execução com usuário não privilegiado.
+- `application.yml`: porta `8080`; PostgreSQL padrão em `localhost:5433`, configurável via `DB_URL`, `DB_USER` e `DB_PASSWORD`.
+- `compose.yaml` (`db`): PostgreSQL `17-alpine`, healthcheck, volume persistente e porta publicada em `127.0.0.1:5433`.
+- `compose.yaml` (`api`): serviço habilitado com o perfil `api`; usa `db:5432` na rede interna e depende do banco saudável.
+- `Dockerfile`: build em dois estágios (Maven e Java 21 JRE), com execução por usuário não privilegiado. O artefato da versão estável local é `orderflow-api-0.1.0.jar`.
 
-O build e a execução completos da **imagem da API** pelo Docker Compose ainda necessitam de validação específica antes da release. As credenciais presentes no Compose são **exclusivamente de desenvolvimento**. Não se deve usar essas configurações como referência de segurança de produção.
+Para iniciar os dois serviços:
 
-## 8. Decisões técnicas e limites conhecidos
+```bash
+docker compose --profile api up --build -d
+```
+
+A imagem da API foi construída com sucesso e o PostgreSQL ficou saudável. A aplicação inicializou, validou a migração do Flyway e respondeu `200 OK` na consulta de produtos. Em teste de ponta a ponta, um pedido de duas unidades foi confirmado e o estoque passou de três para uma unidade.
+
+Para encerrar sem excluir o volume de dados:
+
+```bash
+docker compose --profile api down
+```
+
+**Atenção:** as credenciais de `compose.yaml` e `application.yml` são exemplos exclusivos de desenvolvimento. A porta `5433` é usada pelo host; a porta `5432` é usada entre contêineres. O arquivo `.env.example` deve refletir a porta do host antes da publicação. Não utilizar essas configurações em produção.
+
+## 8. Decisões técnicas, segurança e limitações
 
 ### Decisões
 
-- `BigDecimal` para valores monetários, evitando cálculos com ponto flutuante binário.
-- Snapshot do preço e dos dados do produto no item do pedido.
-- `@Transactional` + bloqueio pessimista para manter reserva de estoque e criação de pedido consistentes.
-- Flyway como fonte de versionamento do esquema e Hibernate com validação do modelo.
-- Organização por domínio para manter Controllers, Services, DTOs e Repositories relacionados próximos.
-- OpenAPI/Swagger UI como documentação dos contratos HTTP.
+- `BigDecimal` para valores monetários.
+- Snapshot dos dados de produto nos itens do pedido.
+- `@Transactional` e `PESSIMISTIC_WRITE` na criação de pedidos com reserva de estoque.
+- Migrações geridas pelo Flyway e esquema validado pelo Hibernate.
+- Organização por domínio, mantendo os elementos relacionados próximos no código.
+- OpenAPI/Swagger UI para documentação dos contratos HTTP.
+
+### Dependências
+
+Foram revisadas as versões de Jackson, Logback e ASM, além da substituição do antigo `android-json` utilizado nos testes. A dependência transitiva **`net.minidev:json-smart`**, previamente identificada na versão `2.6.0` por conta do alerta **CVE-2026-113602**, foi atualizada localmente para **`2.6.1`** no escopo de testes. A nova versão foi confirmada por `mvn dependency:tree` e a suíte passou com 11 testes. Isso não equivale a uma auditoria completa de todas as dependências.
 
 ### Limitações e trabalho futuro
 
-- **Sem autenticação e autorização:** a API é destinada a execução local; não deve ser exposta publicamente sem medidas adicionais.
-- **Sem cancelamento, idempotência ou histórico de movimentações de estoque.**
-- **Sem paginação ou filtros avançados** para listagem de produtos.
-- **Sem ensaios de carga extensivos**; o teste concorrente atual cobre um caso controlado.
-- **Dependência de testes com risco residual:** `net.minidev:json-smart:2.6.0`, identificada no alerta CVE-2026-113602; a avaliação ainda não confirmou uma atualização corrigida adequada. O risco permanece documentado, sem alegação de resolução.
-- **Validação pendente antes da release:** build da API via Docker Compose, revisão de versões do workflow CI e harmonização da versão estável com o nome do artefato usado no `Dockerfile`.
+- **Sem autenticação ou autorização:** a API foi preparada para execução local e não deve ser exposta como serviço público sem controles de segurança.
+- **Sem cancelamento de pedidos, idempotência ou histórico de movimentações de estoque.**
+- **Sem paginação ou filtros avançados** na listagem de produtos.
+- **Sem testes de carga extensivos**; o teste de concorrência cobre um cenário controlado.
+- **Publicação ainda pendente:** atualizar os documentos, revisar credenciais e histórico, registrar o commit `0.1.0`, validar o CI desse commit e publicar a tag/release antes de mudar a visibilidade do repositório.
 
-Consulte [README](../README.md) e [roadmap](roadmap.md) para instruções de uso e próximas entregas.
+Consulte o [README](../README.md) e o [roadmap](roadmap.md) para instruções e próximas entregas.

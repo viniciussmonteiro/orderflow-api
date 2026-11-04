@@ -8,7 +8,7 @@ RUN mvn -B -ntp -DskipTests package
 FROM eclipse-temurin:21-jre
 WORKDIR /app
 RUN useradd --system --uid 10001 appuser
-COPY --from=build /app/target/orderflow-api-0.1.0-SNAPSHOT.jar app.jar
+COPY --from=build /app/target/orderflow-api-0.1.0.jar app.jar
 USER appuser
 EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "app.jar"]
