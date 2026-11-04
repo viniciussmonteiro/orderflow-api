@@ -181,7 +181,7 @@ O OrderFlow é um **projeto de portfólio backend**. A versão atual prioriza in
 
 A aplicação ainda **não possui autenticação ou autorização** e foi preparada para utilização local. Entre as evoluções planejadas estão paginação e filtros no catálogo, cancelamento com reposição de estoque, idempotência na criação de pedidos e mecanismos de segurança para uma eventual publicação.
 
-A revisão de dependências incluiu atualizações de segurança para Jackson, Logback e ASM e a substituição da antiga biblioteca Android JSON. Permanece em avaliação um alerta associado ao `json-smart`, dependência transitiva utilizada **somente no escopo de testes**; isso não representa uma correção definitiva da vulnerabilidade.
+A revisão de dependências incluiu atualizações de segurança para Jackson, Logback e ASM, a substituição do antigo Android JSON e a atualização de net.minidev:json-smart para 2.6.1. A versão efetivamente utilizada foi confirmada com Maven e a suíte de testes foi aprovada. Essas correções não substituem uma auditoria completa de segurança.
 
 O planejamento incremental está disponível em [docs/roadmap.md](docs/roadmap.md).
 
