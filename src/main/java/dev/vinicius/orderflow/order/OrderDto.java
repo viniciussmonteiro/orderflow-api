@@ -1,20 +1,24 @@
 package dev.vinicius.orderflow.order;
 
+import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
+
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.List;
+
 
 public final class OrderDto {
     private OrderDto() {}
 
     public record Line(@NotNull Long productId, @Min(1) int quantity) {}
 
+    @Schema(name = "OrderCreate")
     public record Create(
         @NotBlank @Size(max = 120) String customerName,
         @NotEmpty List<@NotNull @Valid Line> items
@@ -28,6 +32,7 @@ public final class OrderDto {
         }
     }
 
+    @Schema(name = "OrderView")
     public record View(Long id, String customerName, String status, BigDecimal total,
                        OffsetDateTime createdAt, List<ItemView> items) {
         public static View from(CustomerOrder order) {
